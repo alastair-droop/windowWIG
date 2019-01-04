@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+
+import argparse
+from sys import exit
+import re
+
+version = '0.1b (2015-02-17)'
+
+class window(object):
+  def __init__(self, chromosome, width, start=1, data=0):
+    self._chromosome = str(chromosome)
+    self._width = int(width)
+    self._start = int(start)
+    self._data = float(data)
+    self._index = int(0)
+    self._rollover = None
+  def getChromosome(self): return self._chromosome
+  def getStart(self): return self._start
+  def getEnd(self): return self._start + self._width - 1
+  def getWidth(self): return self._width  
+  def getData(self): return self._data
+  def getIndex(self): return self._index
+  def getRollover(self): return self._rollover
+  def setChromosome(self, chromosome): self._chromosome = str(chromosome)
+  def setStart(self, start): self._start = int(start)
+  def setWidth(self, width): self._width = int(width)
+  def setData(self, data): self._data = float(data)
+  def setRollover(self, rollover): self._rollover = rollover
+  def reset(self):
+    self._data = 0
+    self._index = 0
+  def forceRollover(self, default_width):
+    if self.index != 0:
+      self.width = self.index
+      self.data = self.data / self.width
+      if self._rollover != None: self._rollover(self)
+      self.start += self.width
+    self.reset()
+    self.width = int(default_width)
+  def getRemaining(self): return self._width - self._index
+  def append(self, other):
+    width = other.width
+    data = other.data
+    while True:
+      if width >= self.remaining:
+        width = width - self.remaining
+        self.data = self.data + (self.remaining * data)
+        self.data = self.data / self.width
+        self._index += self.remaining
+        if self._rollover != None: self._rollover(self)
+        self.start += self.width
+        self.reset()
+        continue
+      self.data = self.data + (width * data)
+      self._index += width
+      break
+  chromosome = property(getChromosome, setChromosome, None, doc='The window chromosome')
+  start = property(getStart, setStart, None, doc='The window start position')
+  end = property(getEnd, None, None, doc='The window end position')
+  width = property(getWidth, setWidth, None, doc='The window width')
+  data = property(getData, setData, None, doc='The window data')
+  index = property(getIndex, None, None, doc='The window index')
+  remaining = property(getRemaining, None, None, doc='The window space remaining')
+  rollover = property(getRollover, setRollover, None, doc='The window rollover function')
+  def __str__(self): return('({}:{}-{} width={}): {}'.format(self.chromosome, self.start, self.end, self.width, self.data))
+
+def outputWindow(w): print('{}\t{}\t{}\t{:0.6f}'.format(w.chromosome, w.start, w.end, w.data))
+
+def parseHeaderLine(line, line_number):
+  match = header_re.match(line)
+  if match == None: exit('ERROR [line {}]: header mismatch'.format(line_number))
+  if match.group(1) != 'variableStep': exit('ERROR: [line {}]: only variable step wig files are supported'.format(line_number))
+  width = match.group(4)
+  if width == None: width = 1
+  else: width = int(width)
+  return((match.group(1), match.group(2), width))
+
+def parseDataLine(line):
+  data = line.split('\t')
+  return((int(data[0]), float(data[1])))
+
+# Set up the command line arguments:
+parser = argparse.ArgumentParser(description='Generate weighted mean data from a WIG file')
+parser.add_argument('-v', '--version', action='version', version='%(prog)s {}'.format(version))
+parser.add_argument('-w', '--window', dest='window_size', type=int, metavar='<n>', default=None, help='window size')
+parser.add_argument(dest='wigfile', type=str, metavar='<wig>', help='WIG file to process')
+args = parser.parse_args()
+
+# Attempt to open the WIG file:
+try: wig_file = open(args.wigfile, mode='rt')
+except: exit('ERROR: failed to open wig file "{}"'.format(args.wigfile))
+
+header_re = re.compile('^(\S+)\s+chrom=(\S+)(\s+span=(\d+))?')
+current_line_number = 1
+
+# Initialize both windows from the first two lines:
+header = parseHeaderLine(wig_file.readline().strip(), current_line_number)
+data = parseDataLine(wig_file.readline().strip())
+current_region = window(chromosome=header[1], width=header[2], start=data[0], data=data[1])
+
+if args.window_size == None:
+  print('{}\t{}\t{}\t{}'.format(current_region.chromosome, current_region.start, current_region.end, current_region.data))
+  # Here, we just report the current regions:
+  while True:
+    line = wig_file.readline().strip()
+    if line == '': break
+    current_line_number += 1
+    if line[0] == 'v':
+      header = parseHeaderLine(line, current_line_number)
+      current_region.chromosome = header[1]
+      current_region.width = header[2]
+    else:
+      data = parseDataLine(line)
+      current_region.start = data[0]
+      current_region.data = data[1]
+      print('{}\t{}\t{}\t{:0.6}'.format(current_region.chromosome, current_region.start, current_region.end, current_region.data))
+else:
+  #We need to adapt the data to fixed windows:
+  current_window = window(chromosome=current_region.chromosome, width=args.window_size, start=current_region.start)
+  current_window.rollover = outputWindow
+  current_window.append(current_region)
+  while True:
+    line = wig_file.readline().strip()
+    if line == '': break
+    current_line_number += 1
+    if line[0] == 'v':
+      header = parseHeaderLine(line, current_line_number)
+      if header[1] != current_region.chromosome:
+        #We've changed chromosome so we need to reset.
+        current_window.forceRollover(args.window_size)
+        data = parseDataLine(wig_file.readline().strip())
+        current_region.chromosome = header[1]
+        current_region.width = header[2]
+        current_region.start = data[0]
+        current_region.data = data[1]
+        current_window.chromosome = current_region.chromosome
+        current_window.start = current_region.start
+        current_window.append(current_region)
+        wig_file.flush()
+      else:
+        current_region.start = current_region.end + 1
+        current_region.width = header[2]
+    else:
+      data = parseDataLine(line)
+      current_region.start = data[0]
+      current_region.data = data[1]
+      current_window.append(current_region)
+  # After we've finished close the last window, if it is not empty:
+  current_window.forceRollover(args.window_size)
+
+# Close the WIG file:
+wig_file.close()
